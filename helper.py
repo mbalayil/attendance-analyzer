@@ -10,7 +10,6 @@ from rich.console import Console
 
 console = Console()
 
-
 def get_prompt_initial(csv_content):
     prompt = f"""
     You are a data analyst.
@@ -35,18 +34,20 @@ def get_prompt(csv_content, subjects):
     prompt = f"""
     You are a data analyst.
 
-    **Input:** Raw CSV content representing attendance of students in different subjects
+    **Input:** Raw CSV content representing attendance of students in different subjects.
     CSV:
     {csv_content}
     Subjects: {subjects}
 
     **Task:**
-    1. Find the list of all students with less than 75 percent attendance in each subject including theory and practical.
-    2. Find the list of all students with less than 75 percent attendance total (in all subjects combined) including theory and practical.
+    Formula to calculate percentage of attendance in a subject = (Total classes attended by student / Total classes in that subject) * 100
+    1. Find the list of all students with less than 75 percentage attendance in each subject including theory and practical.
+    2. Find the list of all students with less than 75 percentage attendance total (in all subjects combined) including theory and practical.
 
     **Output as JSON - keys being subject names, values being the names of students and their attendance percentage:**
     **Give the key name for overall attendance details as "Overall". Overall attendance for each student is the sum of the attendance in all subjects
     **Total number of classes for each category is also mentioned in the data**
+    **Percentage to be rounded to 2 decimal places**
     **Sample output**
      "subject 1":"name 1":"percentage 1", "name 2":"percentage 2",
      "subject 2":"name 1":"percentage 1", "name 2":"percentage 2", "name 3":"percentage 3",
@@ -56,179 +57,59 @@ def get_prompt(csv_content, subjects):
     """
     return prompt
 
+def _call_gemini_api(prompt, max_retries=3, retry_delay_seconds=5):
+    """A helper function to handle the Gemini API call with retries and error handling."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return "error: GEMINI_API_KEY environment variable not set."
+
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+    payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}]}
+    headers = {"Content-Type": "application/json"}
+    
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(api_url, headers=headers, data=json.dumps(payload), timeout=30)
+            response.raise_for_status()  # Raise HTTPError for bad responses
+            result = response.json()
+
+            if result and result.get("candidates") and len(result["candidates"]) > 0:
+                generated_text = result["candidates"][0].get("content", {}).get("parts", [{}])[0].get("text", "No summary found.")
+                return generated_text
+            else:
+                return f"error: Unexpected API response structure: {json.dumps(result, indent=2)}"
+
+        except requests.HTTPError as http_err:
+            if http_err.response.status_code >= 500 and attempt < max_retries - 1:
+                console.print(f"Attempt {attempt + 1}/{max_retries}: Server error ({http_err.response.status_code}). Retrying...", style="yellow")
+                time.sleep(retry_delay_seconds)
+            else:
+                return f"error: Gemini API request failed: {http_err}"
+        except (requests.ConnectionError, requests.Timeout) as err:
+            if attempt < max_retries - 1:
+                console.print(f"Attempt {attempt + 1}/{max_retries}: Connection error. Retrying...", style="yellow")
+                time.sleep(retry_delay_seconds)
+            else:
+                return f"error: Connection or timeout error after {attempt + 1} attempts: {err}"
+        except json.JSONDecodeError:
+            return f"error: Failed to decode JSON response from Gemini. Response text: {response.text}"
+        except Exception as e:
+            return f"error: An unexpected error occurred during API call: {e}"
+
+    return "error: Failed to get a response after multiple retries."
 
 def get_header_info(df: pd.DataFrame) -> str:
-    """
-    Takes a pandas DataFrame containing attendance data, converts it to a CSV string,
-    sends it to the Gemini API for summarization, and returns the header information.
-
-    Args:
-        df (pd.DataFrame): The pandas DataFrame containing the timesheet data.
-
-    Returns:
-        str: Details of the header info.
-    """
-    # Convert the DataFrame to CSV content string
-    # index=False prevents writing the DataFrame index as a column in the CSV string
+    """Takes a DataFrame, converts to CSV, and calls Gemini for header info."""
+    if df.empty:
+        return "error: Input DataFrame is empty."
     csv_content = df.to_csv(index=False)
-
-    # Gemini API configuration
-    api_key = os.getenv("GEMINI_API_KEY")
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
-
-    # Craft the prompt for Gemini
     prompt = get_prompt_initial(csv_content)
-
-    # Prepare the payload for the API request
-    payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}]}
-    headers = {"Content-Type": "application/json"}
-    max_retries = 3  # Maximum number of retries
-    retry_delay_seconds = 5  # Delay between retries in seconds
-
-    # Send request to Gemini
-    print("Sending request to Gemini API...")
-    for attempt in range(max_retries):
-        console.print(f"Attempt#: {attempt}", style="bold red")
-        try:
-            response = requests.post(api_url, headers=headers, data=json.dumps(payload))
-            response.raise_for_status()  # Raise an HTTPError for bad responses (4xx or 5xx)
-            result = response.json()
-
-            # Extract the generated text from the response
-            if result and result.get("candidates") and len(result["candidates"]) > 0:
-                generated_text = (
-                    result["candidates"][0]
-                    .get("content", {})
-                    .get("parts", [{}])[0]
-                    .get("text", "No summary found.")
-                )
-                console.print(f"Text Generated in attempt#: {attempt}", style="bold green")
-                # console.print(f"Text Generated: {generated_text}", style="bold blue")
-                return generated_text
-            else:
-                return f"Error: Unexpected API response structure: {json.dumps(result, indent=2)}"
-
-        except requests.HTTPError as http_err:
-            # Check for 503 Service Unavailable or other server errors (5xx)
-            if http_err.response.status_code >= 500 and attempt < max_retries - 1:
-                print(
-                    f"Attempt {attempt + 1}/{max_retries}: Server error ({http_err.response.status_code}). Retrying in {retry_delay_seconds} seconds..."
-                )
-                time.sleep(retry_delay_seconds)
-            else:
-                # Re-raise the error if it's not a server error or if max retries reached
-                return f"Error connecting to Gemini API after {attempt + 1} attempts: {http_err}"
-        except requests.ConnectionError as conn_err:
-            # Handle network-related errors (e.g., DNS failure, refused connection)
-            if attempt < max_retries - 1:
-                print(
-                    f"Attempt {attempt + 1}/{max_retries}: Connection error. Retrying in {retry_delay_seconds} seconds..."
-                )
-                time.sleep(retry_delay_seconds)
-            else:
-                return f"Error connecting to Gemini API after {attempt + 1} attempts: {conn_err}"
-        except requests.Timeout as timeout_err:
-            # Handle request timeouts
-            if attempt < max_retries - 1:
-                print(
-                    f"Attempt {attempt + 1}/{max_retries}: Timeout error. Retrying in {retry_delay_seconds} seconds..."
-                )
-                time.sleep(retry_delay_seconds)
-            else:
-                return f"Error connecting to Gemini API after {attempt + 1} attempts: {timeout_err}"
-        except json.JSONDecodeError:
-            return f"Error decoding JSON response: {response.text}"
-        except Exception as e:
-            # Catch any other unexpected errors
-            return f"An unexpected error occurred during API call: {e}"
-    return "Failed to get a summary after multiple retries."  # Should ideally not be reached if max_retries is handled correctly
-
+    return _call_gemini_api(prompt)
 
 def summarize_attendance_sheet_with_gemini(df: pd.DataFrame, subjects: list) -> str:
-    """
-    Takes a pandas DataFrame containing attendance data, converts it to a CSV string,
-    sends it to the Gemini API for summarization, and returns the summarized
-    activities as a string.
-
-    Args:
-        df (pd.DataFrame): The pandas DataFrame containing the timesheet data.
-        subjects (list): The list of subjects.
-
-    Returns:
-        str: Details of the students with less attendance summarized by Gemini,
-             or an error message if the API call fails.
-    """
-    # Convert the DataFrame to CSV content string
-    # index=False prevents writing the DataFrame index as a column in the CSV string
+    """Takes a DataFrame and subjects, converts to CSV, and calls Gemini for attendance summary."""
+    if df.empty or not subjects:
+        return "error: Input DataFrame is empty or subjects list is empty."
     csv_content = df.to_csv(index=False)
-
-    # Gemini API configuration
-    api_key = os.getenv("GEMINI_API_KEY")
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
-
-    # Craft the prompt for Gemini
     prompt = get_prompt(csv_content, subjects)
-
-    # Prepare the payload for the API request
-    payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}]}
-    headers = {"Content-Type": "application/json"}
-    max_retries = 3  # Maximum number of retries
-    retry_delay_seconds = 5  # Delay between retries in seconds
-
-    # Send request to Gemini
-    print("Sending request to Gemini API...")
-    for attempt in range(max_retries):
-        console.print(f"Attempt#: {attempt}", style="bold red")
-        try:
-            response = requests.post(api_url, headers=headers, data=json.dumps(payload))
-            response.raise_for_status()  # Raise an HTTPError for bad responses (4xx or 5xx)
-            result = response.json()
-
-            # Extract the generated text from the response
-            if result and result.get("candidates") and len(result["candidates"]) > 0:
-                generated_text = (
-                    result["candidates"][0]
-                    .get("content", {})
-                    .get("parts", [{}])[0]
-                    .get("text", "No summary found.")
-                )
-                console.print(f"Text Generated in attempt#: {attempt}", style="bold green")
-                # console.print(f"Text Generated: {generated_text}", style="bold blue")
-                return generated_text
-            else:
-                return f"Error: Unexpected API response structure: {json.dumps(result, indent=2)}"
-
-        except requests.HTTPError as http_err:
-            # Check for 503 Service Unavailable or other server errors (5xx)
-            if http_err.response.status_code >= 500 and attempt < max_retries - 1:
-                print(
-                    f"Attempt {attempt + 1}/{max_retries}: Server error ({http_err.response.status_code}). Retrying in {retry_delay_seconds} seconds..."
-                )
-                time.sleep(retry_delay_seconds)
-            else:
-                # Re-raise the error if it's not a server error or if max retries reached
-                return f"Error connecting to Gemini API after {attempt + 1} attempts: {http_err}"
-        except requests.ConnectionError as conn_err:
-            # Handle network-related errors (e.g., DNS failure, refused connection)
-            if attempt < max_retries - 1:
-                print(
-                    f"Attempt {attempt + 1}/{max_retries}: Connection error. Retrying in {retry_delay_seconds} seconds..."
-                )
-                time.sleep(retry_delay_seconds)
-            else:
-                return f"Error connecting to Gemini API after {attempt + 1} attempts: {conn_err}"
-        except requests.Timeout as timeout_err:
-            # Handle request timeouts
-            if attempt < max_retries - 1:
-                print(
-                    f"Attempt {attempt + 1}/{max_retries}: Timeout error. Retrying in {retry_delay_seconds} seconds..."
-                )
-                time.sleep(retry_delay_seconds)
-            else:
-                return f"Error connecting to Gemini API after {attempt + 1} attempts: {timeout_err}"
-        except json.JSONDecodeError:
-            return f"Error decoding JSON response: {response.text}"
-        except Exception as e:
-            # Catch any other unexpected errors
-            return f"An unexpected error occurred during API call: {e}"
-    return "Failed to get a summary after multiple retries."  # Should ideally not be reached if max_retries is handled correctly
+    return _call_gemini_api(prompt)
