@@ -1,12 +1,13 @@
 # Makefile for attendance-analyzer
 # Uses uv package manager
 
-.PHONY: help install dev-install update sync clean lint format check test run build docs dev-setup pre-commit
+.PHONY: help install install-uv dev-install update sync clean lint format check test run build docs dev-setup pre-commit
 
 # Default target
 help:
 	@echo "Available targets:"
-	@echo "  install     - Install dependencies using uv"
+	@echo "  install-uv  - Install UV using standalone installer"
+	@echo "  install     - Install UV and sync dependencies"
 	@echo "  update      - Update all dependencies"
 	@echo "  sync        - Sync virtual environment with lock file"
 	@echo "  clean       - Clean cache and temporary files"
@@ -15,12 +16,26 @@ help:
 	@echo "  check       - Run all checks (lint + format check)"
 	@echo "  run         - Run the application"
 
-# Install dependencies
-install:
-	python -m venv venv-attendence-analyzer
-	venv-attendance-analyzer/bin/activate && \
-		pip install uv
-	uv sync
+# Install UV and dependencies
+install: install-uv sync
+
+# Install UV using standalone installer
+install-uv:
+	@echo "Installing UV using standalone installer..."
+	@if ! command -v uv >/dev/null 2>&1; then \
+		echo "UV not found, installing..."; \
+		if command -v curl >/dev/null 2>&1; then \
+			curl -LsSf https://astral.sh/uv/install.sh | sh; \
+		elif command -v wget >/dev/null 2>&1; then \
+			wget -qO- https://astral.sh/uv/install.sh | sh; \
+		else \
+			echo "Error: Neither curl nor wget is available. Please install one of them first."; \
+			exit 1; \
+		fi; \
+		echo "UV installed successfully. You may need to restart your shell or run: source ~/.bashrc (or ~/.zshrc)"; \
+	else \
+		echo "UV is already installed."; \
+	fi
 
 # Update dependencies
 update:
